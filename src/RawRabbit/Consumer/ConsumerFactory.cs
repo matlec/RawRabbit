@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using RawRabbit.Channel.Abstraction;
+using RawRabbit.Configuration;
 using RawRabbit.Configuration.Consume;
 using RawRabbit.Logging;
 
@@ -15,11 +16,13 @@ namespace RawRabbit.Consumer
 		private readonly IChannelFactory _channelFactory;
 		private readonly ConcurrentDictionary<string, Lazy<Task<IBasicConsumer>>> _consumerCache;
 		private readonly ILog _logger = LogProvider.For<ConsumerFactory>();
+		private readonly RawRabbitConfiguration _clientConfig;
 
-		public ConsumerFactory(IChannelFactory channelFactory)
+		public ConsumerFactory(IChannelFactory channelFactory, RawRabbitConfiguration clientConfig)
 		{
 			_consumerCache = new ConcurrentDictionary<string, Lazy<Task<IBasicConsumer>>>();
 			_channelFactory = channelFactory;
+			_clientConfig = clientConfig;
 		}
 
 		public Task<IBasicConsumer> GetConsumerAsync(ConsumeConfiguration cfg, IModel channel = null, CancellationToken token = default(CancellationToken))
@@ -48,10 +51,13 @@ namespace RawRabbit.Consumer
 					return consumer;
 				});
 			});
-			if (lazyConsumerTask.Value.IsCompleted && lazyConsumerTask.Value.Result.Model.IsClosed)
+			if (lazyConsumerTask.Value.IsCompleted)
 			{
-				_consumerCache.TryRemove(consumerKey, out _);
-				return GetConsumerAsync(cfg, channel, token);
+				if(lazyConsumerTask.Value.IsCanceled || lazyConsumerTask.Value.IsFaulted || (_clientConfig.AutomaticRecovery == false && lazyConsumerTask.Value.Result.Model.IsClosed))
+				{
+					_consumerCache.TryRemove(consumerKey, out _);
+					return GetConfiguredConsumerAsync(cfg, channel, token);
+				}
 			}
 			return lazyConsumerTask.Value;
 		}
