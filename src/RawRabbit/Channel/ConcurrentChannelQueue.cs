@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Threading;
 using System.Threading.Tasks;
 using RabbitMQ.Client;
 
@@ -8,30 +9,31 @@ namespace RawRabbit.Channel
 	public class ConcurrentChannelQueue
 	{
 		private readonly ConcurrentQueue<TaskCompletionSource<IModel>> _queue;
-
-		public EventHandler Queued;
+		private readonly SemaphoreSlim _semaphore;
 
 		public ConcurrentChannelQueue()
 		{
 			_queue = new ConcurrentQueue<TaskCompletionSource<IModel>>();
+			_semaphore = new SemaphoreSlim(0);
 		}
 
-		public TaskCompletionSource<IModel> Enqueue()
+		public void Enqueue(TaskCompletionSource<IModel> modelTsc)
 		{
-			var modelTsc = new TaskCompletionSource<IModel>();
-			var raiseEvent = _queue.IsEmpty;
 			_queue.Enqueue(modelTsc);
-			if (raiseEvent)
-			{
-				Queued?.Invoke(this, EventArgs.Empty);
-			}
-
-			return modelTsc;
+			_semaphore.Release();
 		}
 
-		public bool TryDequeue(out TaskCompletionSource<IModel> channel)
+		public async Task<TaskCompletionSource<IModel>> DequeueAsync(CancellationToken ct = default(CancellationToken))
 		{
-			return _queue.TryDequeue(out channel);
+			for(; ; )
+			{
+				await _semaphore.WaitAsync(ct);
+				TaskCompletionSource<IModel> modelTsc;
+				if(_queue.TryDequeue(out modelTsc))
+				{
+					return modelTsc;
+				}
+			}
 		}
 
 		public bool IsEmpty => _queue.IsEmpty;

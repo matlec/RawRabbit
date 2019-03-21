@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using RabbitMQ.Client;
+using RawRabbit.Common;
 using RawRabbit.Exceptions;
 using RawRabbit.Logging;
 
@@ -19,8 +21,9 @@ namespace RawRabbit.Channel
 		protected readonly LinkedList<IModel> Pool;
 		protected readonly List<IRecoverable> Recoverables;
 		protected readonly ConcurrentChannelQueue ChannelRequestQueue;
-		private readonly object _workLock = new object();
-		private LinkedListNode<IModel> _current;
+		private readonly Task serveChannelsTask;
+		private readonly CancellationTokenSource serveChannelsToken = new CancellationTokenSource();
+		private readonly AsyncAutoResetEvent channelRecoveredEvent = new AsyncAutoResetEvent(false);
 		private readonly ILog _logger = LogProvider.For<StaticChannelPool>();
 
 		public StaticChannelPool(IEnumerable<IModel> seed)
@@ -29,65 +32,69 @@ namespace RawRabbit.Channel
 			Pool = new LinkedList<IModel>(seed);
 			Recoverables = new List<IRecoverable>();
 			ChannelRequestQueue = new ConcurrentChannelQueue();
-			ChannelRequestQueue.Queued += (sender, args) => StartServeChannels();
+			serveChannelsTask = Task.Run(() => StartServeChannels(), serveChannelsToken.Token)
+				.ContinueWith(task =>
+				{
+					if(task.IsCanceled == false && task.IsFaulted)
+					{
+						_logger.Info(task.Exception, "An unhandled exception occurred when serving channels.");
+					}
+				});
 			foreach (var channel in seed)
 			{
 				ConfigureRecovery(channel);
 			}
 		}
 
-		private void StartServeChannels()
+		private async Task StartServeChannels()
 		{
-			if (ChannelRequestQueue.IsEmpty || Pool.Count == 0)
+			_logger.Debug("Starting serving channels.");
+			for(; ;)
 			{
-				_logger.Debug("Unable to serve channels. The pool consists of {channelCount} channels and {channelRequests} requests for channels.");
-				return;
-			}
+				TaskCompletionSource<IModel> modelTcs = await ChannelRequestQueue.DequeueAsync(serveChannelsToken.Token);
 
-			if (!Monitor.TryEnter(_workLock))
-			{
-				_logger.Debug("Unable to aquire work lock for service channels.");
-				return;
-			}
-
-			try
-			{
-				_logger.Debug("Starting serving channels.");
-				do
+				//Wait for an open channel to serve the channel request
+				for(; ; )
 				{
-					_current = _current?.Next ?? Pool.First;
-					if (_current == null)
+					serveChannelsToken.Token.ThrowIfCancellationRequested();
+
+					var currentChannel = Pool.First;
+					while (currentChannel != null)
 					{
-						_logger.Debug("Unable to server channels. Pool empty.");
-						return;
-					}
-					if (_current.Value.IsClosed)
-					{
-						Pool.Remove(_current);
-						if (Pool.Count != 0)
+						var nextChannel = currentChannel.Next;
+						if (currentChannel.Value.IsClosed)
 						{
-							continue;
+							Pool.Remove(currentChannel);
 						}
-						if (Recoverables.Count == 0)
+						else
 						{
-							throw new ChannelAvailabilityException("No open channels in pool and no recoverable channels");
+							break;
 						}
-						_logger.Info("No open channels in pool, but {recoveryCount} waiting for recovery", Recoverables.Count);
-						return;
+						currentChannel = nextChannel;
 					}
-					if (ChannelRequestQueue.TryDequeue(out var cTsc))
+
+					if (currentChannel != null)
 					{
-						cTsc.TrySetResult(_current.Value);
+						//Channel found
+						modelTcs.TrySetResult(currentChannel.Value);
+						break;
 					}
-				} while (!ChannelRequestQueue.IsEmpty);
-			}
-			catch (Exception e)
-			{
-				_logger.Info(e, "An unhandled exception occured when serving channels.");
-			}
-			finally
-			{
-				Monitor.Exit(_workLock);
+					else
+					{
+						if (Recoverables.Count > 0)
+						{
+							//At least one recoverable channel found -> channel may be served later on
+							_logger.Info("No open channels in pool, but {recoveryCount} waiting for recovery", Recoverables.Count);
+							await channelRecoveredEvent.WaitAsync(serveChannelsToken.Token);
+						}
+						else
+						{
+							//Neither open nor recoverable channels found
+							modelTcs.TrySetException(new ChannelAvailabilityException("No open channels in pool and no recoverable channels"));
+							break;
+						}
+					}
+				}
 			}
 		}
 
@@ -120,7 +127,7 @@ namespace RawRabbit.Channel
 					return;
 				}
 				Pool.AddLast(channel);
-				StartServeChannels();
+				channelRecoveredEvent.Set();
 			};
 			channel.ModelShutdown += (sender, args) =>
 			{
@@ -128,13 +135,15 @@ namespace RawRabbit.Channel
 				{
 					_logger.Info("Channel {channelNumber} is being closed by the application. No recovery will be performed.", channel.ChannelNumber);
 					Recoverables.Remove(recoverable);
+					channelRecoveredEvent.Set();
 				}
 			};
 		}
 
 		public virtual Task<IModel> GetAsync(CancellationToken ct = default(CancellationToken))
 		{
-			var channelTcs = ChannelRequestQueue.Enqueue();
+			var channelTcs = new TaskCompletionSource<IModel>();
+			ChannelRequestQueue.Enqueue(channelTcs);
 			ct.Register(() => channelTcs.TrySetCanceled());
 			return channelTcs.Task;
 		}
@@ -149,6 +158,9 @@ namespace RawRabbit.Channel
 			{
 				(recoverable as IModel)?.Dispose();
 			}
+			serveChannelsToken.Cancel();
+			serveChannelsTask.Wait();
+			channelRecoveredEvent.Dispose();
 		}
 	}
 }
