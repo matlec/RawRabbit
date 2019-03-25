@@ -135,7 +135,6 @@ namespace RawRabbit.Channel
 				{
 					_logger.Info("Channel {channelNumber} is being closed by the application. No recovery will be performed.", channel.ChannelNumber);
 					Recoverables.Remove(recoverable);
-					channelRecoveredEvent.Set();
 				}
 			};
 		}
