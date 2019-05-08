@@ -10,10 +10,12 @@
     <PackageIconUrl>http://pardahlman.se/raw/icon.png</PackageIconUrl>
     <PackageProjectUrl>https://github.com/pardahlman/RawRabbit</PackageProjectUrl>
     <Description>Serialize messages with ZeroFormatter in RawRabbit</Description>
+    <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ZeroFormatter" Version="1.6.4" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0-beta2-18618-05" PrivateAssets="All"/>
   </ItemGroup>
 
   <ItemGroup>
