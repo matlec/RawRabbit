@@ -37,7 +37,7 @@ namespace RawRabbit.Channel
 			}
 			catch (BrokerUnreachableException e)
 			{
-				_logger.Info("Unable to connect to broker", e);
+				_logger.Info(e, "Unable to connect to broker");
 				throw;
 			}
 			return Task.FromResult(true);
